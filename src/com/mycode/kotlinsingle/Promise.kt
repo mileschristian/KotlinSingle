@@ -1,5 +1,7 @@
 package com.mycode.kotlinsingle
 
+import androidx.lifecycle.LifecycleOwner
+
 /**
  * Represents a promise tied to an event which resolves on the event thread
  *
@@ -11,6 +13,7 @@ class Promise<T : Any> (private val tag: String){
     private lateinit var nextPromise : Promise<T>
     private lateinit var result : T
     private lateinit var previousPromise : Promise<T>
+    private var lifecycleOwner: LifecycleOwner? = null
 
     //resolves the promise chain
     @Synchronized
@@ -20,8 +23,8 @@ class Promise<T : Any> (private val tag: String){
                 //if 'then' continuation already set
                 if(::onResolve.isInitialized) {
                     state = PromiseState.RESOLVED
-                    //trigger a promise event to resolve on the worker tread
-                    publish(EventPromiseResolve(tag) {
+                    //trigger a promise event to resolve on the subscriber or UI tread
+                    publish(EventPromiseResolve(tag, lifecycleOwner) {
                         onResolve(result, StateInstance.state, nextPromise)
                     })
                 }
@@ -49,11 +52,11 @@ class Promise<T : Any> (private val tag: String){
      * @param value the return value to pass on in the next loop
      */
     fun again(value : T) {
-        if(!::previousPromise.isInitialized) {
+        if(!::previousPromise.isInitialized && (lifecycleOwner != null)) {
             throw Exception("Again() must be called in 'then' continuation only")
         }
 
-        publish(EventPromiseResolve(tag) {
+        publish(EventPromiseResolve(tag, null) {
             //call again the previous continuation
             previousPromise.onResolve(value, StateInstance.state, this)
         })
@@ -73,5 +76,20 @@ class Promise<T : Any> (private val tag: String){
         handleResult()
 
         return nextPromise
+    }
+
+    /**
+     * Registers a handler running on the lifecycleOwner scope, triggered when this promise resolves
+     *
+     * @param lifecycleOwner the lifecycleOwner the handler runs on
+     * @param onResolve the handler
+     */
+    fun thenUpdateUI(lifecycleOwner: LifecycleOwner, onResolve : (T)->Unit) {
+        nextPromise = Promise(tag)
+        nextPromise.previousPromise = this
+        this.lifecycleOwner = lifecycleOwner
+        this.onResolve = { result, _, _ -> onResolve(result) }
+
+        handleResult()
     }
 }

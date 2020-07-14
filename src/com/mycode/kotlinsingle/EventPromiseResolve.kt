@@ -1,3 +1,5 @@
 package com.mycode.kotlinsingle
 
-class EventPromiseResolve (val tag: String, val handler : ()->Unit) : Event()
+import androidx.lifecycle.LifecycleOwner
+
+class EventPromiseResolve (val tag: String, val lifecycleOwner: LifecycleOwner?, val handler : ()->Unit) : Event()

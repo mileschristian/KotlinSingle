@@ -176,7 +176,17 @@ fun processEvent(currentEvent: Event.EventChain) {
 
     //for promise events execute the handler
     if(currentEvent.eventClass == EventPromiseResolve::class) {
-        (currentEvent.event as EventPromiseResolve).handler()
+        (currentEvent.event as EventPromiseResolve).let {
+            if(it.lifecycleOwner == null) {
+                //resolve on subscriber thread
+                it.handler()
+            } else {
+                //resolve on UI thread
+                it.lifecycleOwner.lifecycleScope.launch {
+                    it.handler()
+                }
+            }
+        }
     } else if(currentEvent.eventClass == EventSubscribe::class) {
         //for subscribe events subscribe to the group
         with(currentEvent.event as EventSubscribe) {
