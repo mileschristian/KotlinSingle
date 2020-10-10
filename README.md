@@ -103,7 +103,7 @@ subscribe<EventLogin> { event, state ->
     }
 }
 
-//publish then event, then wait for the result
+//publish the event, modify state once result is available
 publish(EventPromiseLogin()).then { isSuccess, state, promise ->
     if(isSuccess) {
         state.app.isLoggedIn = true
@@ -112,6 +112,13 @@ publish(EventPromiseLogin()).then { isSuccess, state, promise ->
         state.app.isLoggedIn = false
         publish(EventShowWrongUserOrPassword())
     }
+}
+
+//publish the event from an activity, modify UI once result is available
+publish(EventPromiseLogin()).thenUpdateUI(viewLifecycleOwner) { isSuccess ->
+	//this callback occurs on the UI thread so state is not given and cannot be modified here
+	//but you can update UI elements safely
+	textViewStatus.text = if(isSuccess) "Logged In" else "Failed"
 }
 ```
 
@@ -157,6 +164,7 @@ Subscribe and update the UI based on an event, unsubscribe when Activity/Fragmen
 //use subscribeUI passing in the Activity or Fragment viewLifecycleOwner, when the activity or fragment dies the event will be automatically unsubscribed
 subscribeUI<EventItemUpdated>(viewLifecycleOwner) { event ->
     //this callback occurs on the UI thread so state is not given and cannot be modified here
+	//but you can update UI elements safely
     recyclerViewResults?.adapter?.let { (it as MyAdapter).updateItem(event.index) }
 }
 ```
