@@ -19,11 +19,11 @@ abstract class Event {
      * Represents a subscriber
      *
      * @property eventClass class of the event this subscriber subscribes to
-     * @property promiseType type of the promise return value
      * @property callback callback to call when the event is published
+     * @property promiseType type of the promise return value
      * @property promise promise to fulfill when the event is resolved
      */
-     class Subscriber(val eventClass : KClass<*>, val callback : Any, private val promiseType : KClass<*>, val promise : Promise<*>)
+     class Subscriber(val eventClass : KClass<*>, val callback : Any, private val promiseType : KClass<*>, val promise : Promise<*>, var isLifecycleDestroyed : Boolean = false)
 
     /**
      * Represents a chain of pending events to trigger
@@ -56,15 +56,21 @@ private fun addSubscriberToGroup(subscriberGroupName : String, index : Int) {
 }
 
 //subscribes a callback to an event and creates a promise for the subscriber
-fun <T1, T2 : Any> doSubscribe (eventClass : KClass<*>, subscriberGroupName : String?, lifecycleOwner: LifecycleOwner?, promiseType : KClass<*>, callback : (T1, State, Promise<T2>) -> Unit) : Promise<T2> {
+fun <T1, T2 : Any> doSubscribeWithPromise (eventClass : KClass<*>, subscriberGroupName : String?, promiseType : KClass<*>, callback : (T1, State, Event.Subscriber) -> Unit) : Promise<T2> {
     //publish event to subscribe later
     return Promise<T2>(eventClass.simpleName ?: "unknown").also {
-        publish(EventSubscribe(eventClass, subscriberGroupName, lifecycleOwner, promiseType, callback, it))
+        publish(EventSubscribe(eventClass, subscriberGroupName, null, promiseType, callback, it))
     }
 }
 
 //subscribes a callback to an event
-fun <T> doSubscribe (eventClass : KClass<*>, subscriberGroupName : String?, lifecycleOwner: LifecycleOwner?, callback : (T, State, Promise<*>) -> Unit)  {
+fun <T> doSubscribe (eventClass : KClass<*>, subscriberGroupName : String?, callback : (T, State, Event.Subscriber) -> Unit)  {
+    //publish event to subscribe later
+    return publish(EventSubscribe(eventClass, subscriberGroupName, null, Unit::class, callback, Promise<Unit>(eventClass.simpleName ?: "unknown")))
+}
+
+//subscribes a callback to an event to be run on the ui thread
+fun <T> doSubscribeUI (eventClass : KClass<*>, subscriberGroupName : String?, lifecycleOwner: LifecycleOwner?, callback : (T, State, Event.Subscriber) -> Unit)  {
     //publish event to subscribe later
     return publish(EventSubscribe(eventClass, subscriberGroupName, lifecycleOwner, Unit::class, callback, Promise<Unit>(eventClass.simpleName ?: "unknown")))
 }
@@ -78,7 +84,10 @@ fun <T> doSubscribe (eventClass : KClass<*>, subscriberGroupName : String?, life
  * @return promise to fulfill when an asynchronous task is done, the 'then' continuation executes in the event thread
  */
 inline fun <reified T1 : Event, reified T2 : Any> subscribeWithPromise(noinline callback : (T1, State, Promise<T2>) -> Unit) : Promise<T2> {
-    return doSubscribe(T1::class, null, null, T2::class, callback)
+    return doSubscribeWithPromise(T1::class, null,  T2::class) { event : T1, state, subscriber ->
+        @Suppress("UNCHECKED_CAST")
+        callback(event, state, subscriber.promise as Promise<T2>)
+    }
 }
 
 /**
@@ -91,7 +100,10 @@ inline fun <reified T1 : Event, reified T2 : Any> subscribeWithPromise(noinline 
  * @return promise to fulfill when an asynchronous task is done, the 'then' continuation executes in the event thread
  */
 inline fun <reified T1 : Event, reified T2 : Any> subscribeWithPromise(subscriberGroupName : String, noinline callback : (T1, State, Promise<T2>) -> Unit) : Promise<T2> {
-    return doSubscribe(T1::class, subscriberGroupName, null, T2::class, callback)
+    return doSubscribeWithPromise(T1::class, subscriberGroupName, T2::class) { event : T1, state, subscriber ->
+        @Suppress("UNCHECKED_CAST")
+        callback(event, state, subscriber.promise as Promise<T2>)
+    }
 }
 
 /**
@@ -101,7 +113,7 @@ inline fun <reified T1 : Event, reified T2 : Any> subscribeWithPromise(subscribe
  * @param callback callback to call when this event occurs
  */
 inline fun <reified T : Event> subscribe(noinline callback : (T, State) -> Unit) {
-    doSubscribe(T::class, null, null) { event : T, state, _ ->
+    doSubscribe(T::class, null) { event : T, state, _ ->
         callback(event, state)
     }
 }
@@ -114,7 +126,7 @@ inline fun <reified T : Event> subscribe(noinline callback : (T, State) -> Unit)
  * @param callback callback to call when this event occurs
  */
 inline fun <reified T : Event> subscribe(subscriberGroupName : String, noinline callback : (T, State) -> Unit) {
-    doSubscribe(T::class, subscriberGroupName, null) { event : T, state, _ ->
+    doSubscribe(T::class, subscriberGroupName) { event : T, state, _ ->
         callback(event, state)
     }
 }
@@ -127,10 +139,12 @@ inline fun <reified T : Event> subscribe(subscriberGroupName : String, noinline 
  * @param callback callback to call when this event occurs
  */
 inline fun <reified T : Event> subscribeUI(lifecycleOwner: LifecycleOwner, noinline callback : suspend (T) -> Unit) {
-    doSubscribe(T::class, null, lifecycleOwner) { event : T, _, _ ->
-        //run callback on UI thread
+    doSubscribeUI(T::class, null, lifecycleOwner) { event : T, _, subscriber ->
+        //run callback on UI thread if onDestroy was not yet called
         lifecycleOwner.lifecycleScope.launch {
-            callback(event)
+            if(!subscriber.isLifecycleDestroyed) {
+                callback(event)
+            }
         }
     }
 }
@@ -183,7 +197,9 @@ fun processEvent(currentEvent: Event.EventChain) {
             } else {
                 //resolve on UI thread
                 it.lifecycleOwner.lifecycleScope.launch {
-                    it.handler()
+                    if(!it.promise.isLifecycleDestroyed) {
+                        it.handler()
+                    }
                 }
             }
         }
@@ -191,12 +207,13 @@ fun processEvent(currentEvent: Event.EventChain) {
         //for subscribe events subscribe to the group
         with(currentEvent.event as EventSubscribe) {
             var index = -1
+            val subscriber = Event.Subscriber(eventClass, callback, promiseType, promise)
 
             //look for a free space in the list to insert the subscriber into
             for((i, eventCallback) in Event.subscriberList.withIndex()) {
                 if(eventCallback == null) {
                     index = i
-                    Event.subscriberList[index] = Event.Subscriber(eventClass, callback, promiseType, promise)
+                    Event.subscriberList[index] = subscriber
                     break
                 }
             }
@@ -204,7 +221,7 @@ fun processEvent(currentEvent: Event.EventChain) {
             //if no free space add to the end
             if(index == -1) {
                 index = Event.subscriberList.size
-                Event.subscriberList.add(Event.Subscriber(eventClass, callback, promiseType, promise))
+                Event.subscriberList.add(subscriber)
             }
 
             //add to subscriber group if given
@@ -218,6 +235,8 @@ fun processEvent(currentEvent: Event.EventChain) {
                     it.lifecycle.addObserver(object : LifecycleEventObserver {
                         override fun onStateChanged(source: LifecycleOwner, event: Lifecycle.Event) {
                             if(event == Lifecycle.Event.ON_DESTROY) {
+                                //indicate destroyed so any pending callbacks will not be called
+                                subscriber.isLifecycleDestroyed = true
                                 publish(EventUnsubscribe(index))
                             }
                         }
@@ -236,10 +255,10 @@ fun processEvent(currentEvent: Event.EventChain) {
         Event.subscriberList.forEach {
             if (it != null && it.eventClass == currentEvent.eventClass) {
                 @Suppress("UNCHECKED_CAST")
-                (it.callback as (Event, State, Promise<*>) -> Unit)(
+                (it.callback as (Event, State, Event.Subscriber) -> Unit)(
                     currentEvent.event,
                     StateInstance.state,
-                    it.promise
+                    it
                 )
             }
         }

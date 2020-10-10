@@ -1,6 +1,10 @@
 package com.mycode.kotlinsingle
 
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 
 /**
  * Represents a promise tied to an event which resolves on the event thread
@@ -14,6 +18,7 @@ class Promise<T : Any> (private val tag: String){
     private lateinit var result : T
     private lateinit var previousPromise : Promise<T>
     private var lifecycleOwner: LifecycleOwner? = null
+    var isLifecycleDestroyed = false
 
     //resolves the promise chain
     @Synchronized
@@ -24,7 +29,7 @@ class Promise<T : Any> (private val tag: String){
                 if(::onResolve.isInitialized) {
                     state = PromiseState.RESOLVED
                     //trigger a promise event to resolve on the subscriber or UI tread
-                    publish(EventPromiseResolve(tag, lifecycleOwner) {
+                    publish(EventPromiseResolve(tag, lifecycleOwner, this) {
                         onResolve(result, StateInstance.state, nextPromise)
                     })
                 }
@@ -56,7 +61,7 @@ class Promise<T : Any> (private val tag: String){
             throw Exception("Again() must be called in 'then' continuation only")
         }
 
-        publish(EventPromiseResolve(tag, null) {
+        publish(EventPromiseResolve(tag, null, this) {
             //call again the previous continuation
             previousPromise.onResolve(value, StateInstance.state, this)
         })
@@ -89,6 +94,17 @@ class Promise<T : Any> (private val tag: String){
         nextPromise.previousPromise = this
         this.lifecycleOwner = lifecycleOwner
         this.onResolve = { result, _, _ -> onResolve(result) }
+
+        lifecycleOwner.lifecycleScope.launch {
+            lifecycleOwner.lifecycle.addObserver(object : LifecycleEventObserver {
+                override fun onStateChanged(source: LifecycleOwner, event: Lifecycle.Event) {
+                    if(event == Lifecycle.Event.ON_DESTROY) {
+                        //indicate destroyed so any pending promises will not be resolved
+                        isLifecycleDestroyed = true
+                    }
+                }
+            })
+        }
 
         handleResult()
     }
